@@ -1,0 +1,327 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>しずくガチャ</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#0f1218;color:#eef1f6;
+font:14px/1.5 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif;overscroll-behavior:none;user-select:none}
+#app{max-width:400px;margin:0 auto;height:100%;display:flex;flex-direction:column}
+#hud{display:flex;justify-content:space-between;padding:12px 18px 8px;font-size:12px;color:#8d95a5}
+#hud b{color:#eef1f6;font-variant-numeric:tabular-nums;font-size:15px}
+#stage{position:relative;flex:1;margin:0 12px;border-radius:20px;overflow:hidden;
+background:radial-gradient(120% 80% at 50% 0%,#202737 0%,#141821 55%,#0c0f16 100%);
+box-shadow:inset 0 0 0 1px #262d3d,0 22px 44px rgba(0,0,0,.55);touch-action:none}
+canvas{display:block;width:100%;height:100%}
+#dex{display:flex;gap:6px;justify-content:center;padding:12px 12px 6px}
+.slot{width:38px;height:38px;border-radius:11px;background:#1a1f2b;display:flex;align-items:center;justify-content:center;
+position:relative;box-shadow:inset 0 0 0 1px #262d3d}
+.slot canvas{width:26px;height:26px}
+.slot .n{position:absolute;right:3px;bottom:2px;font-size:9px;color:#8d95a5}
+.slot.off canvas{opacity:.13}
+#bar{padding:2px 18px 16px;text-align:center;font-size:11.5px;color:#7c8494}
+#reveal{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(8,10,16,.78);backdrop-filter:blur(3px)}
+#reveal.on{display:flex}
+.card{width:74%;background:#171c27;border-radius:20px;padding:22px 18px 18px;text-align:center;
+box-shadow:inset 0 0 0 1px #2a3244,0 18px 40px rgba(0,0,0,.5)}
+.card canvas{width:96px;height:96px;margin:0 auto 6px;display:block}
+.card .tier{font-size:11px;letter-spacing:.16em;color:#8d95a5}
+.card .nm{font-size:17px;font-weight:700;margin:4px 0 2px}
+.card .new{display:inline-block;font-size:10px;color:#0f1218;background:#9fe8b6;border-radius:6px;padding:1px 7px;margin-bottom:8px}
+.card button{margin-top:10px;background:#e9eef7;color:#14171c;border:0;border-radius:12px;padding:11px 26px;font:inherit;font-weight:700;cursor:pointer}
+#hint{position:absolute;left:0;right:0;bottom:14px;text-align:center;font-size:12px;color:#8d95a5;opacity:0;transition:opacity .2s}
+#hint.on{opacity:1}
+</style></head><body>
+<div id="app">
+  <div id="hud"><div>回した回数 <b id="cnt">0</b></div><div>コンプ <b id="cmp">0</b>/6</div></div>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="hint">キラキラした玉をタップ</div>
+    <div id="reveal"><div class="card">
+      <canvas id="pc"></canvas>
+      <div class="tier" id="rt">N</div>
+      <div class="nm" id="rn">名前</div>
+      <div id="rnew"></div>
+      <button id="rok">とじる</button>
+    </div></div>
+  </div>
+  <div id="dex"></div>
+  <div id="bar">ハンドルを回すと1個でてくる</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"></script>
+<script>
+(function(){
+  var W=360,H=520;
+  var CX=180, CY=212, R=116;
+  var EX=112, EY=470;
+  var Engine=Matter.Engine,Bodies=Matter.Bodies,Body=Matter.Body,Composite=Matter.Composite;
+  var engine=Engine.create({gravity:{y:1}}), world=engine.world;
+  var cv=document.getElementById("cv"), ctx=cv.getContext("2d");
+  var stage=document.getElementById("stage"), dpr=Math.min(window.devicePixelRatio||1,2), SC=1;
+  function size(){
+    var r=stage.getBoundingClientRect();
+    cv.width=Math.round(r.width*dpr); cv.height=Math.round(r.height*dpr);
+    SC=Math.min(r.width/W,r.height/H);
+    var ox=(r.width-W*SC)/2, oy=(r.height-H*SC)/2;
+    ctx.setTransform(dpr*SC,0,0,dpr*SC,dpr*ox,dpr*oy);
+  }
+
+  // 抽選テーブル
+  var ITEMS=[
+    {id:"star", nm:"星のかけら", tier:"N", c:"#ffd48a", w:24},
+    {id:"leaf", nm:"若葉のしおり", tier:"N", c:"#9fd3c7", w:24},
+    {id:"wave", nm:"波のしずく", tier:"N", c:"#a9c2f5", w:20},
+    {id:"moon", nm:"月のまど", tier:"R", c:"#c9a9f5", w:14},
+    {id:"flame",nm:"ちいさな火", tier:"R", c:"#f3b4a0", w:12},
+    {id:"gold", nm:"金のしずく", tier:"SR",c:"#f0c86a", w:6}
+  ];
+  var DEX={}, turns=0;
+  try{DEX=JSON.parse(localStorage.getItem("gacha_dex_v2")||"{}")||{}}catch(e){DEX={}}
+  function save(){try{localStorage.setItem("gacha_dex_v2",JSON.stringify(DEX))}catch(e){}}
+  function pickItem(){
+    var tot=0; ITEMS.forEach(function(i){tot+=i.w});
+    var r=Math.random()*tot;
+    for(var i=0;i<ITEMS.length;i++){ r-=ITEMS[i].w; if(r<=0) return ITEMS[i]; }
+    return ITEMS[0];
+  }
+
+  // 器（円弧の壁）。底に玉が出る隙間を作る
+  var GAP=13; // 度
+  for(var a=-90+GAP; a<=270-GAP; a+=6){
+    var rad=a*Math.PI/180;
+    var bx=CX+Math.cos(rad)*(R+5), by=CY+Math.sin(rad)*(R+5);
+    Composite.add(world,Bodies.rectangle(bx,by,26,12,{isStatic:true,angle:rad+Math.PI/2,
+      restitution:.15,friction:.4,render:{visible:false}}));
+  }
+  // 隙間の栓（玉が勝手に落ちないように）
+  Composite.add(world,Bodies.rectangle(CX,CY+R+6,44,14,{isStatic:true,render:{visible:false},friction:.5}));
+  // 左右の底
+  Composite.add(world,[
+    Bodies.rectangle(CX-R-30,CY+R+40,60,160,{isStatic:true,render:{visible:false}}),
+    Bodies.rectangle(CX+R+30,CY+R+40,60,160,{isStatic:true,render:{visible:false}})
+  ]);
+
+  var caps=[];
+  function addCaps(n){
+    for(var i=0;i<n;i++){
+      var r=15;
+      var ang=Math.random()*Math.PI*2, rr=Math.random()*(R-40);
+      var b=Bodies.circle(CX+Math.cos(ang)*rr*0.8, CY+Math.sin(ang)*rr*0.5, r,
+        {restitution:.25,friction:.22,frictionAir:.012,density:.0018});
+      b.tag={c:"#5d6880"};
+      caps.push(b); Composite.add(world,b);
+    }
+  }
+  addCaps(16);
+
+  // 状態
+  var state="idle", picked=null, prize=null, t=0, crack=0, spin=0;
+  var cntEl=document.getElementById("cnt"), cmpEl=document.getElementById("cmp");
+  var reveal=document.getElementById("reveal"), rn=document.getElementById("rn"), rt=document.getElementById("rt"),
+      rnew=document.getElementById("rnew"), hint=document.getElementById("hint"), pc=document.getElementById("pc");
+  function refreshHud(){
+    cntEl.textContent=turns;
+    var owned=ITEMS.filter(function(i){return DEX[i.id]}).length;
+    cmpEl.textContent=owned;
+    document.querySelectorAll(".slot").forEach(function(s){
+      var id=s.dataset.id; s.classList.toggle("off",!DEX[id]);
+      s.querySelector(".n").textContent=DEX[id]?DEX[id]:"";
+    });
+  }
+
+  // 図鑑
+  var dexEl=document.getElementById("dex");
+  ITEMS.forEach(function(it){
+    var d=document.createElement("div"); d.className="slot off"; d.dataset.id=it.id;
+    var c=document.createElement("canvas"); c.width=52; c.height=52;
+    d.appendChild(c);
+    var n=document.createElement("span"); n.className="n"; d.appendChild(n);
+    dexEl.appendChild(d);
+    drawItem(c.getContext("2d"),it,52);
+  });
+
+  function drawItem(g,it,S){
+    g.clearRect(0,0,S,S);
+    var cx=S/2, cy=S/2, s=S/2*0.86;
+    g.save(); g.translate(cx,cy);
+    g.fillStyle=it.c; g.strokeStyle="rgba(0,0,0,.18)"; g.lineWidth=Math.max(1,S*0.02);
+    if(it.id==="star"){
+      g.beginPath();
+      for(var i=0;i<10;i++){var a=-Math.PI/2+i*Math.PI/5, rr=i%2?s*0.45:s; g.lineTo(Math.cos(a)*rr,Math.sin(a)*rr);}
+      g.closePath(); g.fill(); g.stroke();
+    } else if(it.id==="leaf"){
+      g.beginPath(); g.ellipse(0,0,s*0.95,s*0.55,Math.PI/4,0,7); g.fill(); g.stroke();
+      g.strokeStyle="rgba(0,0,0,.25)"; g.beginPath(); g.moveTo(-s*0.7,s*0.7); g.lineTo(s*0.7,-s*0.7); g.stroke();
+    } else if(it.id==="wave"){
+      g.lineWidth=Math.max(2,S*0.09); g.lineCap="round"; g.strokeStyle=it.c;
+      for(var k=-1;k<=1;k++){
+        g.beginPath();
+        g.moveTo(-s*0.85, k*s*0.42);
+        g.bezierCurveTo(-s*0.3,k*s*0.42-s*0.45, s*0.3,k*s*0.42+s*0.45, s*0.85,k*s*0.42);
+        g.stroke();
+      }
+    } else if(it.id==="moon"){
+      g.beginPath(); g.arc(0,0,s*0.92,0,7); g.fill();
+      g.globalCompositeOperation="destination-out";
+      g.beginPath(); g.arc(s*0.42,-s*0.16,s*0.82,0,7); g.fill();
+      g.globalCompositeOperation="source-over";
+    } else if(it.id==="flame"){
+      g.beginPath();
+      g.moveTo(0,-s);
+      g.bezierCurveTo(s*0.75,-s*0.1,s*0.5,s*0.85,0,s*0.85);
+      g.bezierCurveTo(-s*0.5,s*0.85,-s*0.75,-s*0.1,0,-s);
+      g.closePath(); g.fill(); g.stroke();
+    } else {
+      g.beginPath();
+      g.moveTo(0,-s);
+      g.bezierCurveTo(s*0.85,-s*0.1,s*0.6,s*0.9,0,s*0.9);
+      g.bezierCurveTo(-s*0.6,s*0.9,-s*0.85,-s*0.1,0,-s);
+      g.closePath(); g.fill(); g.stroke();
+    }
+    g.restore();
+  }
+
+  // 回す
+  function turn(){
+    if(state!=="idle")return;
+    state="draw"; turns++; prize=pickItem();
+    // 出口に一番近い玉を選ぶ
+    var best=null,bd=1e9;
+    caps.forEach(function(b){
+      var d=Math.hypot(b.position.x-CX, b.position.y-(CY+R));
+      if(d<bd){bd=d;best=b;}
+    });
+    if(!best){state="idle";return;}
+    Body.setStatic(best,true);
+    best.tag.c=prize.c;
+    picked={b:best,x0:best.position.x,y0:best.position.y};
+    t=0; state="fall";
+  }
+  function spawnOne(){
+    var r=15;
+    var b=Bodies.circle(CX+(Math.random()-0.5)*40, CY-R*0.55, r,
+      {restitution:.25,friction:.22,frictionAir:.012,density:.0018});
+    b.tag={c:"#5d6880"};
+    caps.push(b); Composite.add(world,b);
+  }
+
+  function update(){
+    Engine.update(engine,1000/60);
+    spin*=0.9;
+    if(state==="fall"){
+      t+=1/52; if(t>1)t=1;
+      var e=t<.5?2*t*t:-1+(4-2*t)*t;
+      var px,py;
+      if(e<0.45){
+        var q=e/0.45;
+        px=picked.x0+(CX-picked.x0)*q;
+        py=picked.y0+(CY+R*0.72-picked.y0)*q;
+      } else {
+        var q2=(e-0.45)/0.55;
+        px=CX+(EX-CX)*q2;
+        py=CY+R*0.72+(EY-CY-R*0.72)*q2;
+      }
+      Body.setPosition(picked.b,{x:px,y:py});
+      if(t>=1){ state="ready"; hint.classList.add("on"); }
+    }
+  }
+
+  function openCapsule(){
+    if(state!=="ready")return;
+    state="open"; hint.classList.remove("on");
+    var isNew=!DEX[prize.id];
+    DEX[prize.id]=(DEX[prize.id]||0)+1; save(); refreshHud();
+    var g=pc.getContext("2d"); pc.width=192; pc.height=192;
+    drawItem(g,prize,192);
+    rt.textContent=prize.tier; rn.textContent=prize.nm;
+    rnew.innerHTML=isNew?'<span class="new">はじめて</span>':"";
+    reveal.classList.add("on");
+  }
+  document.getElementById("rok").onclick=function(){
+    reveal.classList.remove("on");
+    Composite.remove(world,picked.b);
+    caps=caps.filter(function(x){return x!==picked.b});
+    spawnOne(); picked=null; prize=null; state="idle";
+  };
+
+  // 描画
+  function draw(){
+    ctx.clearRect(-200,-200,W+400,H+400);
+    // 台座
+    ctx.fillStyle="#171c27";
+    ctx.beginPath();
+    ctx.moveTo(38,352); ctx.lineTo(W-38,352); ctx.lineTo(W-30,H-10); ctx.lineTo(30,H-10); ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle="#0d1018"; ctx.fillRect(30,H-14,W-60,8);
+    // 取り出し口
+    ctx.fillStyle="#0a0d14";
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(EX-38,384,76,54,12) : ctx.rect(EX-38,384,76,54); ctx.fill();
+    ctx.strokeStyle="#2b3243"; ctx.lineWidth=2; ctx.stroke();
+    // ハンドル
+    ctx.save(); ctx.translate(282,412);
+    ctx.rotate(spin);
+    ctx.fillStyle="#2b3243"; ctx.beginPath(); ctx.arc(0,0,30,0,7); ctx.fill();
+    ctx.strokeStyle="#3b4459"; ctx.lineWidth=3; ctx.stroke();
+    ctx.fillStyle="#c8d0de"; ctx.beginPath(); ctx.arc(0,0,8,0,7); ctx.fill();
+    ctx.fillRect(-3,-22,6,26);
+    ctx.restore();
+    // 器（ガラス）
+    ctx.save();
+    ctx.beginPath(); ctx.arc(CX,CY,R+3,0,7);
+    ctx.fillStyle="rgba(150,175,215,.06)"; ctx.fill();
+    ctx.strokeStyle="rgba(190,205,230,.28)"; ctx.lineWidth=3; ctx.stroke();
+    // 玉
+    caps.forEach(function(b){
+      if(state!=="idle"&&picked&&picked.b===b&&state!=="ready"&&state!=="open"){ }
+      var x=b.position.x,y=b.position.y,r=b.circleRadius;
+      ctx.beginPath(); ctx.arc(x,y,r,0,7);
+      var c=b.tag&&b.tag.c?b.tag.c:"#5d6880";
+      ctx.fillStyle=c; ctx.globalAlpha=(picked&&picked.b===b&&state!=="idle")?0.9:0.82;
+      ctx.fill(); ctx.globalAlpha=1;
+      ctx.strokeStyle="rgba(255,255,255,.18)"; ctx.lineWidth=1.4; ctx.stroke();
+      ctx.beginPath(); ctx.arc(x-r*.34,y-r*.38,r*.3,0,7);
+      ctx.fillStyle="rgba(255,255,255,.55)"; ctx.fill();
+    });
+    // 開いた玉
+    if(state==="ready"||state==="open"){
+      var b=picked.b, x=b.position.x, y=b.position.y, r=b.circleRadius;
+      ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fillStyle=b.tag.c; ctx.fill();
+      if(state==="ready"){
+        var pulse=1+Math.sin(Date.now()/240)*0.06;
+        ctx.beginPath(); ctx.arc(x,y,r*pulse+7,0,7);
+        ctx.strokeStyle="rgba(255,255,255,.5)"; ctx.lineWidth=2; ctx.stroke();
+      }
+    }
+    ctx.restore();
+    // ガラスの光
+    ctx.beginPath(); ctx.arc(CX-30,CY-42,52,Math.PI*1.05,Math.PI*1.5);
+    ctx.strokeStyle="rgba(220,235,255,.16)"; ctx.lineWidth=9; ctx.stroke();
+  }
+
+  function loop(){ update(); draw(); requestAnimationFrame(loop); }
+
+  // 操作
+  function hit(px,py){
+    return Math.hypot(px-282,py-412)<44;
+  }
+  function toWorld(e){
+    var r=cv.getBoundingClientRect();
+    var ox=(r.width-W*SC)/2, oy=(r.height-H*SC)/2;
+    return {x:(e.clientX-r.left-ox)/SC, y:(e.clientY-r.top-oy)/SC};
+  }
+  stage.addEventListener("pointerdown",function(e){
+    var p=toWorld(e);
+    if(state==="ready"){
+      if(Math.hypot(p.x-picked.b.position.x,p.y-picked.b.position.y)<44){openCapsule();return;}
+    }
+    if(hit(p.x,p.y)&&state==="idle"){ spin=0.5; turn(); }
+  });
+  window.addEventListener("keydown",function(e){
+    if(e.key===" "){e.preventDefault(); if(state==="ready")openCapsule(); else if(state==="idle"){spin=.5;turn();}}
+  });
+  window.addEventListener("resize",size);
+  window.__gacha={get state(){return state},get turns(){return turns},get dex(){return DEX},
+    turn:function(){if(state==="idle"){spin=.5;turn()}},open:openCapsule,
+    reset:function(){DEX={};save();turns=0;refreshHud()}};
+  size(); refreshHud(); loop();
+})();
+</script></body></html>
